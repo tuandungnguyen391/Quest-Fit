@@ -1,13 +1,3 @@
-/* =========================================================================
-   QUEST FIT — client
-   Talks to the Express + Postgres backend over /api/*. Login sessions are
-   per-tab tokens stored in sessionStorage (not cookies), so each browser
-   tab can be logged into a different account. Matching requires mutual
-   consent: liking someone sends a pending request, and a private chat only
-   opens once the other person accepts it. Chat and match notifications
-   update live over a WebSocket.
-   ========================================================================= */
-
 const SPORTS = [
   {id:'basketball', label:'Basketball', emoji:'🏀'},
   {id:'football', label:'Football (Soccer)', emoji:'⚽'},
@@ -28,9 +18,9 @@ const SPORTS = [
 const sportById = id => SPORTS.find(s=>s.id===id);
 
 let state = {
-  screen: 'loading',      // 'loading' | 'login' | 'signup' | 'app'
+  screen: 'loading',      
   tab: 'discover',
-  session: null,           // {name, age, gender, sports}
+  session: null,           
   authError: '',
   signupForm: {name:'', email:'', password:'', confirm:'', age:'', gender:'', sports:[]},
   loginForm: {email:'', password:''},
@@ -53,7 +43,6 @@ let state = {
 function setState(patch){ state = {...state, ...patch}; render(); }
 function showToast(msg){ setState({toast: msg}); setTimeout(()=>{ if(state.toast===msg) setState({toast:null}); }, 2600); }
 
-// ---------- live chat (WebSocket) ----------
 let liveSocket = null;
 
 function connectLive(){
@@ -72,8 +61,7 @@ function connectLive(){
   };
   socket.onclose = () => {
     if(liveSocket === socket) liveSocket = null;
-    // Keep trying to reconnect as long as we're still logged in (covers
-    // brief network hiccups or a server restart).
+    
     if(getToken()) setTimeout(connectLive, 2000);
   };
   socket.onerror = () => { try{ socket.close(); }catch(e){} };
@@ -100,11 +88,6 @@ function handleMatchAccepted(withName){
   refreshMyMatches();
 }
 
-// ---------- API helper ----------
-// The auth token is stored in sessionStorage, which is scoped to a single
-// browser TAB (unlike cookies or localStorage, which are shared across
-// every tab for the same site). That's what lets you log in as a
-// different account in each tab of the same browser.
 const TOKEN_KEY = 'questfit_token';
 function getToken(){ return sessionStorage.getItem(TOKEN_KEY); }
 function setToken(token){ sessionStorage.setItem(TOKEN_KEY, token); }
@@ -128,7 +111,6 @@ async function api(path, opts={}){
   }
 }
 
-// ---------- validation (mirrors server rules, for instant feedback) ----------
 function validateEmail(email){ return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email); }
 function passwordChecks(pw){
   return {
@@ -144,7 +126,6 @@ function passwordValid(pw){
   return c.length && c.upper && c.lower && c.number && c.special;
 }
 
-// ---------- auth ----------
 async function checkSession(){
   if(!getToken()){ return setState({screen:'login'}); }
   const data = await api('/me');
@@ -205,7 +186,6 @@ async function handleLogout(){
   setState({screen:'login', session:null, tab:'discover', discoverQueue:null, myMatches:{incoming:[], sent:[], accepted:[]}, activeChatWith:null});
 }
 
-// ---------- discover ----------
 async function loadDiscoverQueue(){
   setState({discoverLoading:true});
   const data = await api('/discover');
@@ -233,7 +213,6 @@ async function swipe(action){
   }, 260);
 }
 
-// ---------- search ----------
 async function runSearch(){
   setState({searchLoading:true});
   const f = state.searchFilters;
@@ -258,7 +237,6 @@ async function matchFromSearch(otherName){
   refreshMyMatches();
 }
 
-// ---------- matches / chat ----------
 async function loadMyMatches(){
   setState({matchesLoading:true});
   const data = await api('/matches');
@@ -273,10 +251,6 @@ async function loadMyMatches(){
   });
 }
 
-// Same as loadMyMatches, but doesn't toggle matchesLoading first - used to
-// silently sync the Matches data in the background (e.g. right after you
-// send/accept a request, or when a live event arrives) without flashing a
-// "Loading matches…" placeholder over data that's already on screen.
 async function refreshMyMatches(){
   const data = await api('/matches');
   if(data.error) return;
@@ -315,7 +289,6 @@ async function sendMessage(text){
   setState({chatMessages: [...state.chatMessages, data.message]});
 }
 
-// ---------- rendering ----------
 function esc(s){ const d=document.createElement('div'); d.innerText = s==null?'':String(s); return d.innerHTML; }
 
 function renderAuth(){
