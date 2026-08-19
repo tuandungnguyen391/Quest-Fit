@@ -15,12 +15,9 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
-// ---------- tiny query helpers ----------
 async function one(sql, params) { const r = await pool.query(sql, params); return r.rows[0] || null; }
 async function many(sql, params) { const r = await pool.query(sql, params); return r.rows; }
 
-// Wraps an async route handler so a thrown error becomes a 500 response
-// instead of crashing the process or hanging the request.
 function ah(fn) {
   return (req, res) => fn(req, res).catch(err => {
     console.error(err);
@@ -28,10 +25,6 @@ function ah(fn) {
   });
 }
 
-// In-memory token -> userId map. Each browser TAB holds its own token
-// (in sessionStorage, not a cookie), so multiple tabs in the same browser
-// can be logged in as different accounts at once. Tokens are lost if the
-// server restarts, which just means everyone has to log back in.
 const sessions = new Map();
 
 function createToken(userId) {
@@ -46,10 +39,7 @@ function getUserIdFromReq(req) {
   return sessions.get(token) || null;
 }
 
-// ---------- live chat (WebSocket) ----------
-// Tracks which open sockets belong to which user, so a new chat message can
-// be pushed to the recipient the instant it's sent, without them refreshing.
-const socketsByUser = new Map(); // userId -> Set<ws>
+const socketsByUser = new Map(); 
 
 function registerSocket(userId, ws) {
   if (!socketsByUser.has(userId)) socketsByUser.set(userId, new Set());
@@ -70,7 +60,6 @@ function pushToUser(userId, payload) {
   }
 }
 
-// ---------- helpers ----------
 function publicUser(row, sports) {
   return { id: row.id, name: row.name, age: row.age, gender: row.gender, sports };
 }
@@ -103,7 +92,6 @@ async function findMatch(idA, idB) {
   return one('SELECT * FROM matches WHERE user_a = $1 AND user_b = $2', [a, b]);
 }
 
-// ---------- auth ----------
 app.post('/api/signup', ah(async (req, res) => {
   const { name, email, password, age, gender, sports } = req.body || {};
 
@@ -180,7 +168,6 @@ app.get('/api/me', ah(async (req, res) => {
   res.json({ user: publicUser(row, await getSportsForUser(row.id)) });
 }));
 
-// ---------- discover ----------
 app.get('/api/discover', requireAuth, ah(async (req, res) => {
   const me = await one('SELECT * FROM users WHERE id = $1', [req.userId]);
   const mySports = await getSportsForUser(me.id);
@@ -227,8 +214,7 @@ app.post('/api/swipe', requireAuth, ah(async (req, res) => {
   let status;
 
   if (!existing) {
-    // First request between these two people: create it as pending and
-    // notify the target that someone wants to match with them.
+    
     const [a, b] = matchKey(req.userId, target.id);
     await pool.query(
       'INSERT INTO matches (user_a, user_b, status, requested_by, created_at) VALUES ($1,$2,$3,$4,$5)',
@@ -238,14 +224,13 @@ app.post('/api/swipe', requireAuth, ah(async (req, res) => {
     const me = await one('SELECT name FROM users WHERE id = $1', [req.userId]);
     pushToUser(target.id, { type: 'match_request', fromName: me.name });
   } else if (existing.status === 'pending' && existing.requested_by !== req.userId) {
-    // The other person already requested to match with me - my like
-    // instantly accepts it, same as a mutual match.
+   
     await pool.query('UPDATE matches SET status = $1 WHERE id = $2', ['accepted', existing.id]);
     status = 'accepted';
     const me = await one('SELECT name FROM users WHERE id = $1', [req.userId]);
     pushToUser(existing.requested_by, { type: 'match_accepted', withName: me.name });
   } else {
-    // Already pending (I already requested them) or already accepted.
+  
     status = existing.status;
   }
 
@@ -257,7 +242,6 @@ app.post('/api/swipe', requireAuth, ah(async (req, res) => {
   });
 }));
 
-// ---------- search ----------
 app.get('/api/search', requireAuth, ah(async (req, res) => {
   const { sport, minAge, maxAge, name } = req.query;
   let rows = await many('SELECT * FROM users WHERE id != $1', [req.userId]);
@@ -279,7 +263,6 @@ app.get('/api/search', requireAuth, ah(async (req, res) => {
   res.json({ results });
 }));
 
-// ---------- matches & chat ----------
 app.get('/api/matches', requireAuth, ah(async (req, res) => {
   const rows = await many(
     'SELECT * FROM matches WHERE user_a = $1 OR user_b = $1 ORDER BY created_at DESC',
@@ -324,7 +307,7 @@ app.post('/api/matches/:matchId/decline', requireAuth, ah(async (req, res) => {
   if (m.requested_by === req.userId) return res.status(403).json({ error: "You can't decline your own request." });
 
   await pool.query('DELETE FROM matches WHERE id = $1', [m.id]);
-  // Record it as a pass so this person doesn't reappear in Discover.
+
   await pool.query(`
     INSERT INTO swipes (user_id, target_id, action, created_at) VALUES ($1,$2,'pass',$3)
     ON CONFLICT (user_id, target_id) DO UPDATE SET action = 'pass'
