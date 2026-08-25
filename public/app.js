@@ -27,6 +27,14 @@ const SPORTS = [
 ];
 const sportById = id => SPORTS.find(s=>s.id===id);
 
+const AVATAR_EMOJIS = ['🏅','🔥','⚡','🌟','🚀','🏆','💪','🎯','🌈','🦁','🐺','🐻','🦅','🐢','🌵','🍀'];
+const ACCENT_COLORS = ['#C6FF3D','#FF9F1C','#FF4D6D','#4DA3FF','#B98CFF','#4DFFD2'];
+const TITLES = [
+  '', 'Weekend Warrior', 'Early Riser', 'Gym Rat', 'Trail Blazer', 'Team Captain',
+  'Cardio Junkie', 'Zen Master', 'Adrenaline Seeker', 'Rookie', 'MVP', 'Iron Will', 'Comeback Kid'
+];
+const MAX_BIO_LENGTH = 200;
+
 let state = {
   screen: 'loading',      // 'loading' | 'login' | 'signup' | 'app'
   tab: 'discover',
@@ -48,6 +56,10 @@ let state = {
   chatMessages: [],
   chatLoading: false,
   toast: null,
+  profileModalOpen: false,
+  profileForm: null,       // {bio, avatarEmoji, avatarColor, title, photoDataUrl}
+  profileSaving: false,
+  profileError: '',
 };
 
 function setState(patch){ state = {...state, ...patch}; render(); }
@@ -205,6 +217,73 @@ async function handleLogout(){
   setState({screen:'login', session:null, tab:'discover', discoverQueue:null, myMatches:{incoming:[], sent:[], accepted:[]}, activeChatWith:null});
 }
 
+// ---------- profile customization ----------
+function openProfileModal(){
+  const self = state.session;
+  setState({
+    profileModalOpen: true,
+    profileError: '',
+    profileForm: {
+      bio: self.bio || '',
+      avatarEmoji: self.avatarEmoji || '🏅',
+      avatarColor: self.avatarColor || '#C6FF3D',
+      title: self.title || '',
+      photoDataUrl: self.photoDataUrl || null,
+    }
+  });
+}
+function closeProfileModal(){
+  setState({profileModalOpen:false, profileForm:null, profileError:''});
+}
+
+// Downscales and compresses a chosen photo client-side before it's sent to
+// the server as base64 JSON - keeps uploads small and fast regardless of
+// the original photo's resolution.
+function handlePhotoFile(file){
+  if(!file || !file.type.startsWith('image/')) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const img = new Image();
+    img.onload = () => {
+      const size = 320;
+      const canvas = document.createElement('canvas');
+      canvas.width = size; canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      // cover-crop to a square so avatars aren't stretched
+      const scale = Math.max(size / img.width, size / img.height);
+      const w = img.width * scale, h = img.height * scale;
+      ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+      setState({profileForm: {...state.profileForm, photoDataUrl: dataUrl}});
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+async function saveProfile(){
+  const f = state.profileForm;
+  if(f.bio.length > MAX_BIO_LENGTH){
+    return setState({profileError: `Bio must be ${MAX_BIO_LENGTH} characters or fewer.`});
+  }
+  setState({profileSaving:true, profileError:''});
+  const body = {
+    bio: f.bio,
+    avatarEmoji: f.avatarEmoji,
+    avatarColor: f.avatarColor,
+    title: f.title,
+  };
+  if(f.photoDataUrl === null) body.removePhoto = true;
+  else body.photoDataUrl = f.photoDataUrl;
+
+  const data = await api('/profile', {method:'POST', body});
+  setState({profileSaving:false});
+  if(data.error) return setState({profileError: data.error});
+
+  setState({session: data.user, profileModalOpen:false, profileForm:null});
+  showToast('Profile updated!');
+}
+
 // ---------- discover ----------
 async function loadDiscoverQueue(){
   setState({discoverLoading:true});
@@ -304,14 +383,30 @@ async function declineMatchRequest(matchId){
 
 async function openChat(otherName){
   setState({activeChatWith: otherName, chatLoading:true});
-  const data = await api('/chat/'+encodeURIComponent(otherName));
+  let data = await api('/chat/'+encodeURIComponent(otherName));
+  if(data.error){
+    // The database connection can be slow to wake up right after the
+    // server starts (common on free-tier hosts) - retry once silently
+    // before bothering the user with an error.
+    await new Promise(r => setTimeout(r, 1200));
+    data = await api('/chat/'+encodeURIComponent(otherName));
+  }
+  if(data.error){
+    showToast("Couldn't load messages: "+data.error);
+  }
   setState({chatMessages: data.messages || [], chatLoading:false});
 }
 
-async function sendMessage(text){
+async function sendMessage(text, inputEl){
   if(!text.trim() || !state.activeChatWith) return;
   const data = await api('/chat/'+encodeURIComponent(state.activeChatWith), {method:'POST', body:{text}});
-  if(data.error) return showToast(data.error);
+  if(data.error){
+    // Leave the typed text in place on failure so nothing is lost - the
+    // person can just hit Send again once the connection is back.
+    showToast("Message didn't send: "+data.error);
+    return;
+  }
+  if(inputEl) inputEl.value = '';
   setState({chatMessages: [...state.chatMessages, data.message]});
 }
 
@@ -413,6 +508,22 @@ function passwordField(id, value, placeholder){
   </div>`;
 }
 
+// Renders a circular avatar: the user's photo if they've set one, otherwise
+// their chosen emoji on their chosen color background.
+function avatarHTML(user, size){
+  const s = size || 40;
+  if(user.photoDataUrl){
+    return `<img src="${user.photoDataUrl}" class="avatar-img" style="width:${s}px;height:${s}px;" alt="${esc(user.name)}" />`;
+  }
+  const emoji = user.avatarEmoji || '🏅';
+  const color = user.avatarColor || '#C6FF3D';
+  return `<div class="avatar-emoji" style="width:${s}px;height:${s}px;font-size:${Math.round(s*0.52)}px;background:${color}22;border-color:${color}55;">${emoji}</div>`;
+}
+function titleBadgeHTML(user){
+  if(!user.title) return '';
+  return `<div class="title-badge">${esc(user.title)}</div>`;
+}
+
 function sportTag(id, shared){
   const s = sportById(id);
   if(!s) return '';
@@ -439,10 +550,17 @@ function renderDiscover(self){
       <div class="player-card ${state.cardLeaving?'leaving-'+state.cardLeaving:''}">
         <div class="card-top">
           <div class="ribbon">${sportById(sharedSports[0]).emoji}</div>
-          <div class="card-name display">${esc(card.name)}</div>
-          <div class="card-meta">${card.age} · ${esc(card.gender)}</div>
+          <div class="card-top-row">
+            ${avatarHTML(card, 56)}
+            <div>
+              <div class="card-name display">${esc(card.name)}</div>
+              <div class="card-meta">${card.age} · ${esc(card.gender)}</div>
+            </div>
+          </div>
+          ${titleBadgeHTML(card)}
         </div>
         <div class="card-body">
+          ${card.bio ? `<p class="card-bio">${esc(card.bio)}</p>` : ''}
           <div>
             <div class="stat-label">Plays in common</div>
             <div class="sport-tags">${sharedSports.map(s=>sportTag(s,true)).join('')}</div>
@@ -503,8 +621,15 @@ function renderSearch(){
       results.length === 0 ? `<div class="empty-state">No profiles match those filters.</div>` :
       `<div class="results-grid">${results.map(u=>`
         <div class="mini-card">
-          <div class="mc-name display" style="font-size:16px;">${esc(u.name)}</div>
-          <div class="mc-meta">${u.age} · ${esc(u.gender)}</div>
+          <div class="mc-top-row">
+            ${avatarHTML(u, 44)}
+            <div>
+              <div class="mc-name display" style="font-size:16px;">${esc(u.name)}</div>
+              <div class="mc-meta">${u.age} · ${esc(u.gender)}</div>
+            </div>
+          </div>
+          ${titleBadgeHTML(u)}
+          ${u.bio ? `<p class="mc-bio">${esc(u.bio)}</p>` : ''}
           <div class="sport-tags">${u.sports.map(s=>sportTag(s,false)).join('')}</div>
           <button class="btn btn-lime btn-sm" data-match="${esc(u.name)}">🔥 Match</button>
         </div>`).join('')}</div>`
@@ -515,6 +640,8 @@ function renderSearch(){
 function renderMatches(){
   const { incoming, sent, accepted } = state.myMatches;
   const nothingAtAll = incoming.length === 0 && sent.length === 0 && accepted.length === 0;
+  const chatOther = accepted.find(m => m.other.name === state.activeChatWith)?.other
+    || {name: state.activeChatWith, avatarEmoji:'🏅', avatarColor:'#C6FF3D', photoDataUrl:null};
 
   return `
   <div class="matches-layout">
@@ -526,8 +653,13 @@ function renderMatches(){
         <div class="match-section-label">Requests for you</div>
         ${incoming.map(m=>`
         <div class="match-item request-item">
-          <div class="mi-name">${esc(m.other.name)}</div>
-          <div class="mi-sub">${m.other.sports.map(s=>sportById(s).emoji).join(' ')}</div>
+          <div class="mi-top-row">
+            ${avatarHTML(m.other, 36)}
+            <div>
+              <div class="mi-name">${esc(m.other.name)}</div>
+              <div class="mi-sub">${m.other.sports.map(s=>sportById(s).emoji).join(' ')}</div>
+            </div>
+          </div>
           <div class="request-actions">
             <button class="btn btn-lime btn-sm" data-accept="${m.matchId}" data-accept-name="${esc(m.other.name)}">Accept</button>
             <button class="btn btn-ghost btn-sm" data-decline="${m.matchId}">Decline</button>
@@ -538,24 +670,39 @@ function renderMatches(){
         <div class="match-section-label">Waiting on them</div>
         ${sent.map(m=>`
         <div class="match-item pending-item">
-          <div class="mi-name">${esc(m.other.name)}</div>
-          <div class="mi-sub">Pending — they haven't responded yet</div>
+          <div class="mi-top-row">
+            ${avatarHTML(m.other, 36)}
+            <div>
+              <div class="mi-name">${esc(m.other.name)}</div>
+              <div class="mi-sub">Pending — they haven't responded yet</div>
+            </div>
+          </div>
         </div>`).join('')}` : ''}
 
         ${accepted.length ? `
         <div class="match-section-label">Matches</div>
         ${accepted.map(m=>`
         <div class="match-item ${state.activeChatWith===m.other.name?'active':''}" data-open="${esc(m.other.name)}">
-          <div class="mi-name">${esc(m.other.name)}</div>
-          <div class="mi-sub">${m.other.sports.map(s=>sportById(s).emoji).join(' ')}</div>
+          <div class="mi-top-row">
+            ${avatarHTML(m.other, 36)}
+            <div>
+              <div class="mi-name">${esc(m.other.name)}</div>
+              <div class="mi-sub">${m.other.sports.map(s=>sportById(s).emoji).join(' ')}</div>
+            </div>
+          </div>
         </div>`).join('')}` : ''}
       `}
     </div>
     <div class="chat-panel">
       ${!state.activeChatWith ? `<div class="empty-state" style="margin:auto;border:none;background:none;">Pick a match to start chatting.</div>` : `
       <div class="chat-header">
-        <div>${esc(state.activeChatWith)}</div>
-        <div class="ch-sub">Private conversation</div>
+        <div class="chat-header-row">
+          ${avatarHTML(chatOther, 32)}
+          <div>
+            <div>${esc(state.activeChatWith)}</div>
+            <div class="ch-sub">Private conversation</div>
+          </div>
+        </div>
       </div>
       <div class="chat-body" id="chat-body">
         ${state.chatLoading ? `<div style="color:var(--ink-dim);font-size:13px;">Loading messages…</div>` :
@@ -563,9 +710,13 @@ function renderMatches(){
           state.chatMessages.map(m=>{
             const side = m.from === 'me' ? 'me' : 'them';
             const senderName = m.from === 'me' ? state.session.name : state.activeChatWith;
+            const senderUser = m.from === 'me' ? state.session : chatOther;
             return `
           <div class="msg-group ${side}">
-            <div class="msg-sender">${esc(senderName)}</div>
+            <div class="msg-sender-row">
+              ${avatarHTML(senderUser, 20)}
+              <div class="msg-sender">${esc(senderName)}</div>
+            </div>
             <div class="msg ${side}">
               ${esc(m.text)}
               <span class="ts">${new Date(m.ts).toLocaleString([], {hour:'2-digit',minute:'2-digit'})}</span>
@@ -584,6 +735,19 @@ function renderMatches(){
 
 async function render(){
   const app = document.getElementById('app');
+
+  // The whole screen gets rebuilt from scratch on every state change,
+  // including on unrelated background events (a live chat push, a toast,
+  // a match notification). The chat input isn't bound to state, so
+  // without this it would silently lose whatever you were mid-typing the
+  // instant any of those fired. Snapshot it here and restore it below.
+  const prevChatInput = document.getElementById('chat-input');
+  const savedChatInput = prevChatInput ? {
+    value: prevChatInput.value,
+    start: prevChatInput.selectionStart,
+    end: prevChatInput.selectionEnd,
+    focused: document.activeElement === prevChatInput,
+  } : null;
 
   if(state.screen !== 'app'){
     app.innerHTML = renderAuth();
@@ -608,7 +772,10 @@ async function render(){
         </div>
       </div>
       <div class="user-pill">
-        <span>${esc(self.name)}</span>
+        <button class="user-pill-clickable" id="edit-profile-btn">
+          ${avatarHTML(self, 30)}
+          <span>${esc(self.name)}</span>
+        </button>
         <span class="who">${self.sports.map(s=>sportById(s).emoji).join('')}</span>
         <button class="btn btn-ghost btn-sm" id="logout-btn">Log out</button>
       </div>
@@ -619,7 +786,7 @@ async function render(){
       <div class="tab ${state.tab==='matches'?'active':''}" data-tab="matches">Matches<span class="count">${state.myMatches.incoming.length||''}</span></div>
     </div>
     ${tabContent}
-    <div class="footer-note">Quest Fit · running on your own server, data stored in questfit.db.</div>
+    <div class="footer-note">Quest Fit · running on your own server, data stored in a cloud Postgres database.</div>
   `;
 
   if(state.matchModal){
@@ -645,6 +812,78 @@ async function render(){
     document.body.insertAdjacentHTML('beforeend', `<div class="toast">${esc(state.toast)}</div>`);
   }
 
+  if(state.profileModalOpen && state.profileForm){
+    const f = state.profileForm;
+    document.body.insertAdjacentHTML('beforeend', `
+      <div class="modal-backdrop" id="profile-backdrop">
+        <div class="modal-card profile-modal">
+          <div class="display" style="font-size:22px;margin-bottom:14px;">Edit profile</div>
+          ${state.profileError ? `<div class="error-box">${esc(state.profileError)}</div>` : ''}
+
+          <div class="profile-photo-row">
+            ${f.photoDataUrl
+              ? `<img src="${f.photoDataUrl}" class="avatar-img" style="width:76px;height:76px;" alt="Your photo" />`
+              : `<div class="avatar-emoji" style="width:76px;height:76px;font-size:38px;background:${f.avatarColor}22;border-color:${f.avatarColor}55;">${f.avatarEmoji}</div>`
+            }
+            <div class="profile-photo-actions">
+              <label class="btn btn-ghost btn-sm" for="photo-file-input" style="cursor:pointer;">Upload photo</label>
+              <input type="file" id="photo-file-input" accept="image/*" style="display:none;" />
+              ${f.photoDataUrl ? `<button class="btn btn-ghost btn-sm" id="remove-photo-btn">Remove photo</button>` : ''}
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Avatar (used when you don't have a photo)</label>
+            <div class="chip-grid">
+              ${AVATAR_EMOJIS.map(e=>`<div class="emoji-chip ${f.avatarEmoji===e?'selected':''}" data-avatar-emoji="${e}">${e}</div>`).join('')}
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Accent color</label>
+            <div class="color-swatch-row">
+              ${ACCENT_COLORS.map(c=>`<div class="color-swatch ${f.avatarColor===c?'selected':''}" data-avatar-color="${c}" style="background:${c};"></div>`).join('')}
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Title</label>
+            <select id="profile-title">
+              ${TITLES.map(t=>`<option value="${esc(t)}" ${f.title===t?'selected':''}>${t || 'No title'}</option>`).join('')}
+            </select>
+          </div>
+
+          <div class="field">
+            <label>Bio</label>
+            <textarea id="profile-bio" rows="3" maxlength="${MAX_BIO_LENGTH}" placeholder="Tell people what you're about...">${esc(f.bio)}</textarea>
+            <div class="hint" id="bio-counter">${f.bio.length}/${MAX_BIO_LENGTH}</div>
+          </div>
+
+          <button class="btn btn-lime btn-block" id="profile-save-btn" ${state.profileSaving?'disabled':''}>${state.profileSaving ? 'Saving…' : 'Save profile'}</button>
+          <button class="btn btn-ghost btn-block" id="profile-cancel-btn" style="margin-top:10px;">Cancel</button>
+        </div>
+      </div>`);
+
+    document.getElementById('profile-cancel-btn').onclick = closeProfileModal;
+    document.getElementById('profile-save-btn').onclick = saveProfile;
+    document.getElementById('photo-file-input').onchange = (e) => handlePhotoFile(e.target.files[0]);
+    const removeBtn = document.getElementById('remove-photo-btn');
+    if(removeBtn) removeBtn.onclick = () => setState({profileForm:{...state.profileForm, photoDataUrl:null}});
+
+    document.querySelectorAll('[data-avatar-emoji]').forEach(chip=>{
+      chip.onclick = () => setState({profileForm:{...state.profileForm, avatarEmoji: chip.getAttribute('data-avatar-emoji')}});
+    });
+    document.querySelectorAll('[data-avatar-color]').forEach(sw=>{
+      sw.onclick = () => setState({profileForm:{...state.profileForm, avatarColor: sw.getAttribute('data-avatar-color')}});
+    });
+    document.getElementById('profile-title').onchange = (e) => { state.profileForm.title = e.target.value; };
+    const bioInput = document.getElementById('profile-bio');
+    bioInput.oninput = () => {
+      state.profileForm.bio = bioInput.value;
+      document.getElementById('bio-counter').textContent = `${bioInput.value.length}/${MAX_BIO_LENGTH}`;
+    };
+  }
+
   wireAppEvents();
 
   if(state.tab === 'discover' && state.discoverQueue === null && !state.discoverLoading){
@@ -655,6 +894,17 @@ async function render(){
   }
   const chatBody = document.getElementById('chat-body');
   if(chatBody) chatBody.scrollTop = chatBody.scrollHeight;
+
+  if(savedChatInput){
+    const newChatInput = document.getElementById('chat-input');
+    if(newChatInput){
+      newChatInput.value = savedChatInput.value;
+      if(savedChatInput.focused){
+        newChatInput.focus();
+        try{ newChatInput.setSelectionRange(savedChatInput.start, savedChatInput.end); }catch(e){}
+      }
+    }
+  }
 }
 
 function wireAuthEvents(){
@@ -703,6 +953,7 @@ function wireAuthEvents(){
 function wireAppEvents(){
   const byId = id => document.getElementById(id);
   byId('logout-btn').onclick = handleLogout;
+  byId('edit-profile-btn').onclick = openProfileModal;
   document.querySelectorAll('.tab').forEach(t=>{
     t.onclick = ()=>{
       const tab = t.getAttribute('data-tab');
@@ -751,9 +1002,10 @@ function wireAppEvents(){
     });
     const sendBtn = byId('chat-send'), input = byId('chat-input');
     if(sendBtn){
-      sendBtn.onclick = ()=>{ const v = input.value; input.value=''; sendMessage(v); };
+      const doSend = ()=> sendMessage(input.value, input);
+      sendBtn.onclick = doSend;
       input.addEventListener('keydown', e=>{
-        if(e.key==='Enter'){ const v = input.value; input.value=''; sendMessage(v); }
+        if(e.key==='Enter') doSend();
       });
     }
   }

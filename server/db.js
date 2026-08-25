@@ -80,6 +80,17 @@ async function initSchema() {
   await pool.query(`
     UPDATE matches SET status = 'accepted' WHERE requested_by IS NULL AND status = 'pending';
   `);
+
+  // --- migration: profile decoration (avatar, color, title, bio, photo) ---
+  // Existing accounts get sensible defaults automatically since these
+  // columns have DEFAULT values - no backfill needed.
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_emoji TEXT NOT NULL DEFAULT '🏅';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_color TEXT NOT NULL DEFAULT '#C6FF3D';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT '';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT NOT NULL DEFAULT '';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_data_url TEXT;
+  `);
 }
 
 module.exports = { pool, initSchema };

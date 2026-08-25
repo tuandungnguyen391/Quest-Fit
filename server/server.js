@@ -11,8 +11,17 @@ const SPORTS = [
   'swimming','volleyball','yoga','golf','boxing','climbing','baseball','hiking','badminton'
 ];
 
+const AVATAR_EMOJIS = ['🏅','🔥','⚡','🌟','🚀','🏆','💪','🎯','🌈','🦁','🐺','🐻','🦅','🐢','🌵','🍀'];
+const ACCENT_COLORS = ['#C6FF3D','#FF9F1C','#FF4D6D','#4DA3FF','#B98CFF','#4DFFD2'];
+const TITLES = [
+  '', 'Weekend Warrior', 'Early Riser', 'Gym Rat', 'Trail Blazer', 'Team Captain',
+  'Cardio Junkie', 'Zen Master', 'Adrenaline Seeker', 'Rookie', 'MVP', 'Iron Will', 'Comeback Kid'
+];
+const MAX_BIO_LENGTH = 200;
+const MAX_PHOTO_DATA_URL_LENGTH = 700_000; // ~500KB image, base64-encoded
+
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '2mb' })); // photos are sent as base64 JSON, default 100kb limit is too small
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // ---------- tiny query helpers ----------
@@ -72,7 +81,18 @@ function pushToUser(userId, payload) {
 
 // ---------- helpers ----------
 function publicUser(row, sports) {
-  return { id: row.id, name: row.name, age: row.age, gender: row.gender, sports };
+  return {
+    id: row.id,
+    name: row.name,
+    age: row.age,
+    gender: row.gender,
+    sports,
+    avatarEmoji: row.avatar_emoji || '🏅',
+    avatarColor: row.avatar_color || '#C6FF3D',
+    title: row.title || '',
+    bio: row.bio || '',
+    photoDataUrl: row.photo_data_url || null,
+  };
 }
 async function getSportsForUser(userId) {
   const rows = await many('SELECT sport_id FROM user_sports WHERE user_id = $1', [userId]);
@@ -150,7 +170,13 @@ app.post('/api/signup', ah(async (req, res) => {
   }
 
   const token = createToken(userId);
-  res.json({ user: publicUser({ id: userId, name: cleanName, age: ageNum, gender }, sports), token });
+  res.json({
+    user: publicUser(
+      { id: userId, name: cleanName, age: ageNum, gender, avatar_emoji: '🏅', avatar_color: '#C6FF3D', title: '', bio: '', photo_data_url: null },
+      sports
+    ),
+    token
+  });
 }));
 
 app.post('/api/login', ah(async (req, res) => {
@@ -177,6 +203,51 @@ app.get('/api/me', ah(async (req, res) => {
   if (!userId) return res.json({ user: null });
   const row = await one('SELECT * FROM users WHERE id = $1', [userId]);
   if (!row) return res.json({ user: null });
+  res.json({ user: publicUser(row, await getSportsForUser(row.id)) });
+}));
+
+app.get('/api/profile-options', (req, res) => {
+  res.json({ avatarEmojis: AVATAR_EMOJIS, accentColors: ACCENT_COLORS, titles: TITLES, maxBioLength: MAX_BIO_LENGTH });
+});
+
+app.post('/api/profile', requireAuth, ah(async (req, res) => {
+  const { bio, avatarEmoji, avatarColor, title, photoDataUrl, removePhoto } = req.body || {};
+
+  if (bio !== undefined && (typeof bio !== 'string' || bio.length > MAX_BIO_LENGTH)) {
+    return res.status(400).json({ error: `Bio must be ${MAX_BIO_LENGTH} characters or fewer.` });
+  }
+  if (avatarEmoji !== undefined && !AVATAR_EMOJIS.includes(avatarEmoji)) {
+    return res.status(400).json({ error: 'Pick a valid avatar.' });
+  }
+  if (avatarColor !== undefined && !ACCENT_COLORS.includes(avatarColor)) {
+    return res.status(400).json({ error: 'Pick a valid color.' });
+  }
+  if (title !== undefined && !TITLES.includes(title)) {
+    return res.status(400).json({ error: 'Pick a valid title.' });
+  }
+  if (photoDataUrl !== undefined && photoDataUrl !== null) {
+    if (typeof photoDataUrl !== 'string' || !/^data:image\/(png|jpeg|jpg|webp);base64,/.test(photoDataUrl)) {
+      return res.status(400).json({ error: 'Invalid photo format.' });
+    }
+    if (photoDataUrl.length > MAX_PHOTO_DATA_URL_LENGTH) {
+      return res.status(400).json({ error: 'That photo is too large - please choose a smaller one.' });
+    }
+  }
+
+  const fields = [];
+  const values = [];
+  let i = 1;
+  if (bio !== undefined) { fields.push(`bio = $${i++}`); values.push(bio.trim()); }
+  if (avatarEmoji !== undefined) { fields.push(`avatar_emoji = $${i++}`); values.push(avatarEmoji); }
+  if (avatarColor !== undefined) { fields.push(`avatar_color = $${i++}`); values.push(avatarColor); }
+  if (title !== undefined) { fields.push(`title = $${i++}`); values.push(title); }
+  if (removePhoto) { fields.push(`photo_data_url = NULL`); }
+  else if (photoDataUrl !== undefined) { fields.push(`photo_data_url = $${i++}`); values.push(photoDataUrl); }
+
+  if (fields.length === 0) return res.status(400).json({ error: 'Nothing to update.' });
+
+  values.push(req.userId);
+  const row = await one(`UPDATE users SET ${fields.join(', ')} WHERE id = $${i} RETURNING *`, values);
   res.json({ user: publicUser(row, await getSportsForUser(row.id)) });
 }));
 
