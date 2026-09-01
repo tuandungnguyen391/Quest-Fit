@@ -5,7 +5,7 @@
    tab can be logged into a different account. Matching requires mutual
    consent: liking someone sends a pending request, and a private chat only
    opens once the other person accepts it. Chat and match notifications
-   update live over a WebSocket
+   update live over a WebSocket.
    ========================================================================= */
 
 const SPORTS = [
