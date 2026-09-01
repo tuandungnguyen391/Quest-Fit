@@ -91,6 +91,18 @@ async function initSchema() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT NOT NULL DEFAULT '';
     ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_data_url TEXT;
   `);
+
+  // --- migration: photo posts ---
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS posts (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      image_data_url TEXT NOT NULL,
+      caption TEXT NOT NULL DEFAULT '',
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_posts_user_id ON posts(user_id);
+  `);
 }
 
 module.exports = { pool, initSchema };

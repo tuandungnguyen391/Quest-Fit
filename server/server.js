@@ -19,6 +19,8 @@ const TITLES = [
 ];
 const MAX_BIO_LENGTH = 200;
 const MAX_PHOTO_DATA_URL_LENGTH = 700_000; // ~500KB image, base64-encoded
+const MAX_POST_CAPTION_LENGTH = 200;
+const MAX_POSTS_PER_USER = 24;
 
 const app = express();
 app.use(express.json({ limit: '2mb' })); // photos are sent as base64 JSON, default 100kb limit is too small
@@ -251,6 +253,51 @@ app.post('/api/profile', requireAuth, ah(async (req, res) => {
   values.push(req.userId);
   const row = await one(`UPDATE users SET ${fields.join(', ')} WHERE id = $${i} RETURNING *`, values);
   res.json({ user: publicUser(row, await getSportsForUser(row.id)) });
+}));
+
+// ---------- photo posts ----------
+function publicPost(row) {
+  return { id: row.id, imageDataUrl: row.image_data_url, caption: row.caption || '', createdAt: Number(row.created_at) };
+}
+
+app.get('/api/posts/:name', requireAuth, ah(async (req, res) => {
+  const user = await one('SELECT id FROM users WHERE LOWER(name) = LOWER($1)', [req.params.name]);
+  if (!user) return res.status(404).json({ error: 'Profile not found.' });
+  const rows = await many('SELECT * FROM posts WHERE user_id = $1 ORDER BY created_at DESC', [user.id]);
+  res.json({ posts: rows.map(publicPost) });
+}));
+
+app.post('/api/posts', requireAuth, ah(async (req, res) => {
+  const { imageDataUrl, caption } = req.body || {};
+
+  if (!imageDataUrl || typeof imageDataUrl !== 'string' || !/^data:image\/(png|jpeg|jpg|webp);base64,/.test(imageDataUrl)) {
+    return res.status(400).json({ error: 'Choose a photo to post.' });
+  }
+  if (imageDataUrl.length > MAX_PHOTO_DATA_URL_LENGTH) {
+    return res.status(400).json({ error: 'That photo is too large - please choose a smaller one.' });
+  }
+  if (caption !== undefined && (typeof caption !== 'string' || caption.length > MAX_POST_CAPTION_LENGTH)) {
+    return res.status(400).json({ error: `Caption must be ${MAX_POST_CAPTION_LENGTH} characters or fewer.` });
+  }
+
+  const { count } = await one('SELECT COUNT(*) FROM posts WHERE user_id = $1', [req.userId]);
+  if (Number(count) >= MAX_POSTS_PER_USER) {
+    return res.status(400).json({ error: `You've reached the ${MAX_POSTS_PER_USER}-post limit - delete an old one to add a new one.` });
+  }
+
+  const row = await one(
+    'INSERT INTO posts (user_id, image_data_url, caption, created_at) VALUES ($1,$2,$3,$4) RETURNING *',
+    [req.userId, imageDataUrl, (caption || '').trim(), Date.now()]
+  );
+  res.json({ post: publicPost(row) });
+}));
+
+app.delete('/api/posts/:id', requireAuth, ah(async (req, res) => {
+  const row = await one('SELECT * FROM posts WHERE id = $1', [req.params.id]);
+  if (!row) return res.status(404).json({ error: 'Post not found.' });
+  if (row.user_id !== req.userId) return res.status(403).json({ error: 'You can only delete your own posts.' });
+  await pool.query('DELETE FROM posts WHERE id = $1', [req.params.id]);
+  res.json({ ok: true });
 }));
 
 // ---------- discover ----------

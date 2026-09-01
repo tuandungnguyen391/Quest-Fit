@@ -34,6 +34,7 @@ const TITLES = [
   'Cardio Junkie', 'Zen Master', 'Adrenaline Seeker', 'Rookie', 'MVP', 'Iron Will', 'Comeback Kid'
 ];
 const MAX_BIO_LENGTH = 200;
+const MAX_POST_CAPTION_LENGTH = 200;
 
 let state = {
   screen: 'loading',      // 'loading' | 'login' | 'signup' | 'app'
@@ -61,6 +62,14 @@ let state = {
   profileSaving: false,
   profileError: '',
   viewingProfile: null,     // another user's full profile object, when open
+  viewingProfilePosts: [],
+  viewingProfilePostsLoading: false,
+  myPosts: [],
+  myPostsLoading: true,
+  addPostModalOpen: false,
+  addPostForm: null,        // {imageDataUrl, caption}
+  addPostSaving: false,
+  addPostError: '',
 };
 
 function setState(patch){ state = {...state, ...patch}; render(); }
@@ -215,7 +224,7 @@ async function handleLogout(){
   await api('/logout', {method:'POST'});
   clearToken();
   disconnectLive();
-  setState({screen:'login', session:null, tab:'discover', discoverQueue:null, myMatches:{incoming:[], sent:[], accepted:[]}, activeChatWith:null});
+  setState({screen:'login', session:null, tab:'discover', discoverQueue:null, myMatches:{incoming:[], sent:[], accepted:[]}, activeChatWith:null, myPosts:[], myPostsLoading:true});
 }
 
 // ---------- profile customization ----------
@@ -286,10 +295,17 @@ async function saveProfile(){
 }
 
 function openProfileView(user){
-  setState({viewingProfile: user});
+  setState({viewingProfile: user, viewingProfilePosts: [], viewingProfilePostsLoading: true});
+  loadPostsFor(user.name, (posts) => {
+    // Only apply if we're still looking at the same profile (avoids a race
+    // if the person clicks a different profile before this finishes).
+    if(state.viewingProfile && state.viewingProfile.name === user.name){
+      setState({viewingProfilePosts: posts, viewingProfilePostsLoading: false});
+    }
+  });
 }
 function closeProfileView(){
-  setState({viewingProfile: null});
+  setState({viewingProfile: null, viewingProfilePosts: []});
 }
 async function matchFromProfileView(otherName){
   const data = await api('/swipe', {method:'POST', body:{targetName:otherName, action:'like'}});
@@ -301,6 +317,69 @@ async function matchFromProfileView(otherName){
   }
   closeProfileView();
   refreshMyMatches();
+}
+
+// ---------- photo posts ----------
+async function loadPostsFor(name, onDone){
+  const data = await api('/posts/'+encodeURIComponent(name));
+  onDone(data.posts || []);
+}
+async function loadMyPosts(){
+  setState({myPostsLoading:true});
+  const data = await api('/posts/'+encodeURIComponent(state.session.name));
+  setState({myPosts: data.posts || [], myPostsLoading:false});
+}
+
+function openAddPostModal(){
+  setState({addPostModalOpen:true, addPostForm:{imageDataUrl:null, caption:''}, addPostError:''});
+}
+function closeAddPostModal(){
+  setState({addPostModalOpen:false, addPostForm:null, addPostError:''});
+}
+
+// Same resize/compress approach as profile photos, but preserves the
+// original aspect ratio (contain, not a square crop) since posts are
+// viewed larger than an avatar.
+function handlePostPhotoFile(file){
+  if(!file || !file.type.startsWith('image/')) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const img = new Image();
+    img.onload = () => {
+      const maxDim = 900;
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+      const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+      setState({addPostForm: {...state.addPostForm, imageDataUrl: dataUrl}});
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+async function submitPost(){
+  const f = state.addPostForm;
+  if(!f.imageDataUrl) return setState({addPostError:'Choose a photo to post.'});
+  if(f.caption.length > MAX_POST_CAPTION_LENGTH){
+    return setState({addPostError:`Caption must be ${MAX_POST_CAPTION_LENGTH} characters or fewer.`});
+  }
+  setState({addPostSaving:true, addPostError:''});
+  const data = await api('/posts', {method:'POST', body:{imageDataUrl:f.imageDataUrl, caption:f.caption}});
+  setState({addPostSaving:false});
+  if(data.error) return setState({addPostError:data.error});
+
+  setState({myPosts:[data.post, ...state.myPosts], addPostModalOpen:false, addPostForm:null});
+  showToast('Posted!');
+}
+
+async function deletePost(postId){
+  if(!confirm('Delete this post?')) return;
+  const data = await api('/posts/'+postId, {method:'DELETE'});
+  if(data.error) return showToast(data.error);
+  setState({myPosts: state.myPosts.filter(p => p.id !== Number(postId))});
 }
 
 // ---------- discover ----------
@@ -674,6 +753,7 @@ function renderProfile(self){
         <div class="card-meta">${self.age} · ${esc(self.gender)}</div>
         ${titleBadgeHTML(self)}
         <div class="profile-stats-row">
+          <div class="profile-stat"><b>${state.myPosts.length}</b><span>post${state.myPosts.length===1?'':'s'}</span></div>
           <div class="profile-stat"><b>${self.sports.length}</b><span>sport${self.sports.length===1?'':'s'}</span></div>
           <div class="profile-stat"><b>${state.myMatches.accepted.length}</b><span>match${state.myMatches.accepted.length===1?'':'es'}</span></div>
           ${joinedLabel(self) ? `<div class="profile-stat"><b>${joinedLabel(self)}</b><span>joined</span></div>` : ''}
@@ -685,7 +765,23 @@ function renderProfile(self){
 
     <div class="stat-label" style="margin-top:22px;">Plays</div>
     <div class="sport-tags">${self.sports.map(s=>sportTag(s,false)).join('')}</div>
+
+    <div class="posts-header">
+      <div class="stat-label" style="margin:0;">Posts</div>
+      <button class="btn btn-lime btn-sm" id="add-post-btn">+ Add post</button>
+    </div>
+    ${renderPostsGrid(state.myPosts, state.myPostsLoading, true)}
   </div>`;
+}
+
+function renderPostsGrid(posts, loading, ownPosts){
+  if(loading) return `<div class="posts-loading">Loading posts…</div>`;
+  if(posts.length === 0) return `<div class="posts-empty">${ownPosts ? "You haven't posted anything yet." : "No posts yet."}</div>`;
+  return `<div class="posts-grid">${posts.map(p=>`
+    <div class="post-tile" style="background-image:url('${p.imageDataUrl}')" data-post-id="${p.id}">
+      ${p.caption ? `<div class="post-tile-caption">${esc(p.caption)}</div>` : ''}
+      ${ownPosts ? `<button class="post-delete-btn" data-delete-post="${p.id}" title="Delete post">✕</button>` : ''}
+    </div>`).join('')}</div>`;
 }
 
 function renderProfileViewModal(){
@@ -703,6 +799,8 @@ function renderProfileViewModal(){
         ${u.bio ? `<p class="profile-bio" style="margin-top:16px;">${esc(u.bio)}</p>` : ''}
         <div class="stat-label" style="margin-top:16px;">Plays</div>
         <div class="sport-tags">${u.sports.map(s=>sportTag(s,false)).join('')}</div>
+        <div class="stat-label" style="margin-top:16px;">Posts</div>
+        ${renderPostsGrid(state.viewingProfilePosts, state.viewingProfilePostsLoading, false)}
         <button class="btn btn-lime btn-block" id="profile-view-match-btn" style="margin-top:20px;">🔥 Match</button>
         <button class="btn btn-ghost btn-block" id="profile-view-close-btn" style="margin-top:10px;">Close</button>
       </div>
@@ -820,7 +918,6 @@ async function render(){
   // a match notification). The chat input isn't bound to state, so
   // without this it would silently lose whatever you were mid-typing the
   // instant any of those fired. Snapshot it here and restore it below.
-  document.querySelectorAll('.modal-backdrop, .toast').forEach(el => el.remove()); 
   const prevChatInput = document.getElementById('chat-input');
   const savedChatInput = prevChatInput ? {
     value: prevChatInput.value,
@@ -895,6 +992,44 @@ async function render(){
     const u = state.viewingProfile;
     document.getElementById('profile-view-close-btn').onclick = closeProfileView;
     document.getElementById('profile-view-match-btn').onclick = ()=> matchFromProfileView(u.name);
+  }
+
+  if(state.addPostModalOpen && state.addPostForm){
+    const f = state.addPostForm;
+    document.body.insertAdjacentHTML('beforeend', `
+      <div class="modal-backdrop" id="add-post-backdrop">
+        <div class="modal-card profile-modal">
+          <div class="display" style="font-size:22px;margin-bottom:14px;">New post</div>
+          ${state.addPostError ? `<div class="error-box">${esc(state.addPostError)}</div>` : ''}
+
+          <div class="post-photo-picker">
+            ${f.imageDataUrl
+              ? `<img src="${f.imageDataUrl}" class="post-photo-preview" alt="Selected photo" />`
+              : `<label for="post-photo-input" class="post-photo-placeholder">Tap to choose a photo</label>`
+            }
+            <input type="file" id="post-photo-input" accept="image/*" style="display:none;" />
+          </div>
+          ${f.imageDataUrl ? `<label class="btn btn-ghost btn-sm" for="post-photo-input" style="cursor:pointer;margin-top:10px;display:inline-block;">Choose a different photo</label>` : ''}
+
+          <div class="field" style="margin-top:14px;">
+            <label>Caption (optional)</label>
+            <textarea id="post-caption" rows="2" maxlength="${MAX_POST_CAPTION_LENGTH}" placeholder="Say something about it...">${esc(f.caption)}</textarea>
+            <div class="hint" id="post-caption-counter">${f.caption.length}/${MAX_POST_CAPTION_LENGTH}</div>
+          </div>
+
+          <button class="btn btn-lime btn-block" id="post-submit-btn" ${state.addPostSaving?'disabled':''}>${state.addPostSaving ? 'Posting…' : 'Post'}</button>
+          <button class="btn btn-ghost btn-block" id="post-cancel-btn" style="margin-top:10px;">Cancel</button>
+        </div>
+      </div>`);
+
+    document.getElementById('post-cancel-btn').onclick = closeAddPostModal;
+    document.getElementById('post-submit-btn').onclick = submitPost;
+    document.getElementById('post-photo-input').onchange = (e) => handlePostPhotoFile(e.target.files[0]);
+    const captionInput = document.getElementById('post-caption');
+    captionInput.oninput = () => {
+      state.addPostForm.caption = captionInput.value;
+      document.getElementById('post-caption-counter').textContent = `${captionInput.value.length}/${MAX_POST_CAPTION_LENGTH}`;
+    };
   }
 
   if(state.toast){
@@ -983,6 +1118,9 @@ async function render(){
   }
   if(state.tab === 'profile' && state.matchesLoading){
     loadMyMatches();
+  }
+  if(state.tab === 'profile' && state.myPostsLoading){
+    loadMyPosts();
   }
   const chatBody = document.getElementById('chat-body');
   if(chatBody) chatBody.scrollTop = chatBody.scrollHeight;
@@ -1086,6 +1224,11 @@ function wireAppEvents(){
   if(state.tab === 'profile'){
     const editBtn = byId('profile-page-edit-btn');
     if(editBtn) editBtn.onclick = openProfileModal;
+    const addPostBtn = byId('add-post-btn');
+    if(addPostBtn) addPostBtn.onclick = openAddPostModal;
+    document.querySelectorAll('[data-delete-post]').forEach(btn=>{
+      btn.onclick = (e)=>{ e.stopPropagation(); deletePost(btn.getAttribute('data-delete-post')); };
+    });
   }
 
   if(state.tab === 'matches'){
