@@ -60,6 +60,7 @@ let state = {
   profileForm: null,       // {bio, avatarEmoji, avatarColor, title, photoDataUrl}
   profileSaving: false,
   profileError: '',
+  viewingProfile: null,     // another user's full profile object, when open
 };
 
 function setState(patch){ state = {...state, ...patch}; render(); }
@@ -282,6 +283,24 @@ async function saveProfile(){
 
   setState({session: data.user, profileModalOpen:false, profileForm:null});
   showToast('Profile updated!');
+}
+
+function openProfileView(user){
+  setState({viewingProfile: user});
+}
+function closeProfileView(){
+  setState({viewingProfile: null});
+}
+async function matchFromProfileView(otherName){
+  const data = await api('/swipe', {method:'POST', body:{targetName:otherName, action:'like'}});
+  if(data.error) return showToast(data.error);
+  if(data.status === 'accepted'){
+    showToast("It's a match with "+otherName+"! Check your Matches tab.");
+  } else {
+    showToast('Match request sent to '+otherName+' — waiting for them to accept.');
+  }
+  closeProfileView();
+  refreshMyMatches();
 }
 
 // ---------- discover ----------
@@ -523,6 +542,11 @@ function titleBadgeHTML(user){
   if(!user.title) return '';
   return `<div class="title-badge">${esc(user.title)}</div>`;
 }
+function joinedLabel(user){
+  if(!user.joinedAt) return '';
+  const d = new Date(user.joinedAt);
+  return d.toLocaleDateString([], {month:'long', year:'numeric'});
+}
 
 function sportTag(id, shared){
   const s = sportById(id);
@@ -621,7 +645,7 @@ function renderSearch(){
       results.length === 0 ? `<div class="empty-state">No profiles match those filters.</div>` :
       `<div class="results-grid">${results.map(u=>`
         <div class="mini-card">
-          <div class="mc-top-row">
+          <div class="mc-top-row mc-top-row-clickable" data-view-profile="${esc(u.name)}">
             ${avatarHTML(u, 44)}
             <div>
               <div class="mc-name display" style="font-size:16px;">${esc(u.name)}</div>
@@ -635,6 +659,54 @@ function renderSearch(){
         </div>`).join('')}</div>`
     }
   </div>`;
+}
+
+function renderProfile(self){
+  return `
+  <div class="profile-page">
+    <div class="profile-header">
+      ${avatarHTML(self, 96)}
+      <div class="profile-header-info">
+        <div class="profile-name-row">
+          <div class="display" style="font-size:24px;">${esc(self.name)}</div>
+          <button class="btn btn-ghost btn-sm" id="profile-page-edit-btn">Edit profile</button>
+        </div>
+        <div class="card-meta">${self.age} · ${esc(self.gender)}</div>
+        ${titleBadgeHTML(self)}
+        <div class="profile-stats-row">
+          <div class="profile-stat"><b>${self.sports.length}</b><span>sport${self.sports.length===1?'':'s'}</span></div>
+          <div class="profile-stat"><b>${state.myMatches.accepted.length}</b><span>match${state.myMatches.accepted.length===1?'':'es'}</span></div>
+          ${joinedLabel(self) ? `<div class="profile-stat"><b>${joinedLabel(self)}</b><span>joined</span></div>` : ''}
+        </div>
+      </div>
+    </div>
+
+    ${self.bio ? `<p class="profile-bio">${esc(self.bio)}</p>` : `<p class="profile-bio profile-bio-empty">No bio yet — add one from Edit profile.</p>`}
+
+    <div class="stat-label" style="margin-top:22px;">Plays</div>
+    <div class="sport-tags">${self.sports.map(s=>sportTag(s,false)).join('')}</div>
+  </div>`;
+}
+
+function renderProfileViewModal(){
+  const u = state.viewingProfile;
+  if(!u) return '';
+  return `
+    <div class="modal-backdrop" id="profile-view-backdrop">
+      <div class="modal-card profile-modal">
+        <div style="text-align:center;">
+          <div style="display:flex;justify-content:center;margin-bottom:14px;">${avatarHTML(u, 88)}</div>
+          <div class="display" style="font-size:22px;">${esc(u.name)}</div>
+          <div class="card-meta" style="margin-bottom:6px;">${u.age} · ${esc(u.gender)}</div>
+          ${titleBadgeHTML(u)}
+        </div>
+        ${u.bio ? `<p class="profile-bio" style="margin-top:16px;">${esc(u.bio)}</p>` : ''}
+        <div class="stat-label" style="margin-top:16px;">Plays</div>
+        <div class="sport-tags">${u.sports.map(s=>sportTag(s,false)).join('')}</div>
+        <button class="btn btn-lime btn-block" id="profile-view-match-btn" style="margin-top:20px;">🔥 Match</button>
+        <button class="btn btn-ghost btn-block" id="profile-view-close-btn" style="margin-top:10px;">Close</button>
+      </div>
+    </div>`;
 }
 
 function renderMatches(){
@@ -736,6 +808,13 @@ function renderMatches(){
 async function render(){
   const app = document.getElementById('app');
 
+  // Modals and toasts get appended directly to document.body (outside
+  // #app) further down, so rebuilding #app's innerHTML never touches
+  // them. Without this cleanup, closing a modal (or any background
+  // re-render while one is open) leaves the old overlay stuck on screen
+  // permanently, blocking the whole page.
+  document.querySelectorAll('.modal-backdrop, .toast').forEach(el => el.remove());
+
   // The whole screen gets rebuilt from scratch on every state change,
   // including on unrelated background events (a live chat push, a toast,
   // a match notification). The chat input isn't bound to state, so
@@ -761,6 +840,7 @@ async function render(){
   if(state.tab === 'discover') tabContent = renderDiscover(self);
   else if(state.tab === 'search') tabContent = renderSearch();
   else if(state.tab === 'matches') tabContent = renderMatches();
+  else if(state.tab === 'profile') tabContent = renderProfile(self);
 
   app.innerHTML = `
     <div class="topbar">
@@ -784,6 +864,7 @@ async function render(){
       <div class="tab ${state.tab==='discover'?'active':''}" data-tab="discover">Discover</div>
       <div class="tab ${state.tab==='search'?'active':''}" data-tab="search">Search</div>
       <div class="tab ${state.tab==='matches'?'active':''}" data-tab="matches">Matches<span class="count">${state.myMatches.incoming.length||''}</span></div>
+      <div class="tab ${state.tab==='profile'?'active':''}" data-tab="profile">Profile</div>
     </div>
     ${tabContent}
     <div class="footer-note">Quest Fit · running on your own server, data stored in a cloud Postgres database.</div>
@@ -806,6 +887,13 @@ async function render(){
       await openChat(other.name);
     };
     document.getElementById('modal-close-btn').onclick = ()=> setState({matchModal:null});
+  }
+
+  if(state.viewingProfile){
+    document.body.insertAdjacentHTML('beforeend', renderProfileViewModal());
+    const u = state.viewingProfile;
+    document.getElementById('profile-view-close-btn').onclick = closeProfileView;
+    document.getElementById('profile-view-match-btn').onclick = ()=> matchFromProfileView(u.name);
   }
 
   if(state.toast){
@@ -890,6 +978,9 @@ async function render(){
     loadDiscoverQueue();
   }
   if(state.tab === 'matches' && state.matchesLoading){
+    loadMyMatches();
+  }
+  if(state.tab === 'profile' && state.matchesLoading){
     loadMyMatches();
   }
   const chatBody = document.getElementById('chat-body');
@@ -982,6 +1073,18 @@ function wireAppEvents(){
     document.querySelectorAll('[data-match]').forEach(b=>{
       b.onclick = ()=> matchFromSearch(b.getAttribute('data-match'));
     });
+    document.querySelectorAll('[data-view-profile]').forEach(el=>{
+      el.onclick = ()=>{
+        const name = el.getAttribute('data-view-profile');
+        const user = (state.searchResults || []).find(u => u.name === name);
+        if(user) openProfileView(user);
+      };
+    });
+  }
+
+  if(state.tab === 'profile'){
+    const editBtn = byId('profile-page-edit-btn');
+    if(editBtn) editBtn.onclick = openProfileModal;
   }
 
   if(state.tab === 'matches'){

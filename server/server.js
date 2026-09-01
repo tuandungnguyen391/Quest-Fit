@@ -92,6 +92,7 @@ function publicUser(row, sports) {
     title: row.title || '',
     bio: row.bio || '',
     photoDataUrl: row.photo_data_url || null,
+    joinedAt: row.created_at != null ? Number(row.created_at) : null,
   };
 }
 async function getSportsForUser(userId) {
@@ -148,6 +149,7 @@ app.post('/api/signup', ah(async (req, res) => {
   if (existingEmail) return res.status(409).json({ error: 'An account with that email already exists.' });
 
   const hash = bcrypt.hashSync(password, 10);
+  const createdAt = Date.now();
 
   const client = await pool.connect();
   let userId;
@@ -155,7 +157,7 @@ app.post('/api/signup', ah(async (req, res) => {
     await client.query('BEGIN');
     const result = await client.query(
       'INSERT INTO users (name, email, password_hash, age, gender, created_at) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id',
-      [cleanName, email.trim(), hash, ageNum, gender, Date.now()]
+      [cleanName, email.trim(), hash, ageNum, gender, createdAt]
     );
     userId = result.rows[0].id;
     for (const s of sports) {
@@ -172,7 +174,7 @@ app.post('/api/signup', ah(async (req, res) => {
   const token = createToken(userId);
   res.json({
     user: publicUser(
-      { id: userId, name: cleanName, age: ageNum, gender, avatar_emoji: '🏅', avatar_color: '#C6FF3D', title: '', bio: '', photo_data_url: null },
+      { id: userId, name: cleanName, age: ageNum, gender, avatar_emoji: '🏅', avatar_color: '#C6FF3D', title: '', bio: '', photo_data_url: null, created_at: createdAt },
       sports
     ),
     token
