@@ -820,6 +820,7 @@ async function render(){
   // a match notification). The chat input isn't bound to state, so
   // without this it would silently lose whatever you were mid-typing the
   // instant any of those fired. Snapshot it here and restore it below.
+  document.querySelectorAll('.modal-backdrop, .toast').forEach(el => el.remove()); 
   const prevChatInput = document.getElementById('chat-input');
   const savedChatInput = prevChatInput ? {
     value: prevChatInput.value,
